@@ -1,0 +1,468 @@
+<html>
+<head>
+<meta name=viewport content="width=500, user-scalable=no">
+<meta property="og:title" content="cut-e Spatial Orientation Test"/>
+<meta property="og:type" content="website"/>
+<meta property="og:description" content="Select the aircraft flying the direction indicated by the GYRO and drag it to the zone indicated by the RBI."/>
+<meta property="og:image" content="scales-ndb-preview.png" />
+<title>cut-e scales-ndb test</title>
+<style>
+canvas#canvas {
+	border: 1px solid black;
+}
+svg#svgAnswers {
+	border: 1px solid black;
+	width: 480px;
+	height: 180px;
+}
+input, table, span#spanCorrectQuestions, div#divTimer {
+	font: bold 24px Arial;
+}
+div#divTimeIsUp, div#divWithTimer {
+	display: none
+}
+div#divWithTimer, div#divTimeIsUp {
+	padding: 10px;
+}
+</style>
+<script type="text/javascript" src="interact.min.js"></script>
+<script type="text/javascript">
+const DEG2RAD = Math.PI / 180;
+var questionBank = [], pastQuestions = [], correctQuestion = [];
+var selectedAircraft = null, selectedDropzone = null;
+var timerInterval = null, timerExpire = null;
+
+var Question = function() {
+	let drawRbi = function(canvas, centerX, centerY, radius, rotateDegree, needle, needleDegree) {
+		let context = canvas.getContext('2d');
+		// draw bg circle
+		context.beginPath();
+		context.arc(centerX, centerY, radius, 0, 2 * Math.PI, false);
+		context.fillStyle = '#000000';
+		context.fill();
+		context.lineWidth = 5;
+		context.strokeStyle = '#888888';
+		context.stroke();
+		
+		// draw white lines per 5 deg (longer for 10 deg)
+		// every 30 deg draw bearing marking (if N/E/S/W, write eng instead of num)
+		for(let deg = 0; deg < 360; deg += 5) {
+			let lineDegree = deg - 90;
+			context.beginPath();
+			let lineSize = (lineDegree % 10 == 0 ? radius * 0.1 : radius * 0.05); // every 10 deg, make it longer
+			context.lineWidth = (lineDegree % 45 == 0 ? radius * 0.05 : radius * 0.02); // every 45 deg, thicker
+			context.strokeStyle = (lineDegree % 45 == 0 ? '#FF8000' : '#EFEFEF'); // every 45 deg orange, else white
+			context.moveTo(centerX + Math.cos(lineDegree * DEG2RAD) * (radius - lineSize), centerY + Math.sin(lineDegree * DEG2RAD) * (radius - lineSize));
+			context.lineTo(centerX + Math.cos(lineDegree * DEG2RAD) * radius, centerY + Math.sin(lineDegree * DEG2RAD) * radius);
+			context.stroke();
+			
+			if(deg % 30 == 0) {
+				context.save();
+				context.translate(centerX, centerY);
+				context.rotate( (deg + rotateDegree) * DEG2RAD);
+				context.font = radius * 0.16 + "px Arial";
+				context.fillStyle = "#EFEFEF"; // white
+				context.textAlign = "center";
+				let bearingText = Math.round(deg / 10);
+				if(bearingText == 0)
+					bearingText = "N";
+				else if(bearingText == 9)
+					bearingText = "E";
+				else if(bearingText == 18)
+					bearingText = "S";
+				else if(bearingText == 27)
+					bearingText = "W";
+				context.fillText( bearingText, 0, radius * 0.25 - radius );
+				context.restore();
+			}
+		}
+		
+		// draw aircraft in center
+		context.beginPath();
+		context.lineWidth = radius * 0.05;
+		context.strokeStyle = '#FF8000';
+		// wing
+		context.moveTo(centerX - radius * 0.3, centerY);
+		context.lineTo(centerX + radius * 0.3, centerY);
+		context.stroke();
+		// fuselage
+		context.moveTo(centerX, centerY - radius * 0.2);
+		context.lineTo(centerX, centerY + radius * 0.3);
+		context.stroke();
+		// horizontal stabilizer
+		context.moveTo(centerX - radius * 0.1, centerY + radius * 0.25);
+		context.lineTo(centerX + radius * 0.1, centerY + radius * 0.25);
+		context.stroke();
+		
+		// draw needle
+		if(needle) {
+			let deg = needleDegree - 90;
+			context.beginPath();
+			context.lineWidth = radius * 0.03;
+			context.strokeStyle = '#FFFF00';
+			context.fillStyle = '#FFFF00';
+			context.moveTo(centerX - Math.cos(deg * DEG2RAD) * radius * 0.9, centerY - Math.sin(deg * DEG2RAD) * radius * 0.9);
+			context.lineTo(centerX + Math.cos(deg * DEG2RAD) * radius * 0.9, centerY + Math.sin(deg * DEG2RAD) * radius * 0.9);
+			context.lineTo(centerX + Math.cos((deg - 5) * DEG2RAD) * radius * 0.7, centerY + Math.sin((deg - 5) * DEG2RAD) * radius * 0.7);
+			context.lineTo(centerX + Math.cos((deg + 5) * DEG2RAD) * radius * 0.7, centerY + Math.sin((deg + 5) * DEG2RAD) * radius * 0.7);
+			context.lineTo(centerX + Math.cos(deg * DEG2RAD) * radius * 0.9, centerY + Math.sin(deg * DEG2RAD) * radius * 0.9);
+			context.stroke();
+			context.fill();
+		}
+	}
+
+	let nextRandomQuestion = function() {
+		while(true) {
+			let rand = Math.floor(Math.random() * 32);
+			if(questionBank.length >= 32) {
+				// already ran through all possible questions, let's start again
+				questionBank = [rand];
+				// console.log(JSON.stringify(questionBank));
+				return rand;
+			}
+			// check if this question appeared before, if not, generate another one
+			let duplicate = false;
+			for(let i in questionBank) {
+				if(rand == questionBank[i]) {
+					duplicate = true;
+					break;
+				}
+			}
+			if(!duplicate) {
+				questionBank.push(rand);
+				pastQuestions.push(rand);
+				// console.log(JSON.stringify(questionBank));
+				return rand;
+			}
+		}
+	};
+
+	this.value = nextRandomQuestion();
+	this.bearingPos = Math.floor(this.value % 4);
+	this.adfPos = Math.floor(this.value * 0.25);
+	this.draw = function() {
+		let canvas = g('canvas');
+		let context = canvas.getContext('2d');
+		context.clearRect(0, 0, canvas.width, canvas.height); // clear
+		var bearing = this.bearingPos * 90; //degree
+		var adf = this.adfPos * 45; //degree
+		var radius = 100;
+		drawRbi(canvas, canvas.width * 0.75, canvas.height * 0.5 - 10, radius, 0, true, adf);
+		drawRbi(canvas, canvas.width * 0.25, canvas.height * 0.5 - 10, radius, bearing, false, null);
+		
+		context.font = "bold " + radius * 0.16 + "px Arial";
+		context.fillStyle = "#000000";
+		context.textAlign = "center";
+		context.fillText("GYRO", canvas.width * 0.25, canvas.height * 0.5 + radius + 10);
+		context.fillText("RBI", canvas.width * 0.75, canvas.height * 0.5 + radius + 10);
+	}
+	this.equalsTo = function(ques) {
+		return this.value == ques.value;
+		// return this.bearingPos == ques.bearingPos && this.adfPos == ques.adfPos;
+	}
+}
+
+var g = function(id) { return document.getElementById(id); }
+var docLoad = function() {
+	// draw randomly
+	// clear();
+	let ques = new Question();
+	// console.log(ques.bearingPos + ', ' + ques.adfPos);
+	ques.draw();
+	// bind event handler
+	g('btnDrawAgain').addEventListener('click', function() {
+		checkAnswer();
+		while(correctQuestion.length < pastQuestions.length) {
+			correctQuestion.push(0);
+			updateCorrectQuestions();
+		}
+		let ques = new Question();
+		// reset gyro and rbi
+		ques.draw();
+		// reset aircraft pos
+		var aircrafts = ['ac0', 'ac1', 'ac2', 'ac3'];
+		for(let i in aircrafts) {
+			let ac = g(aircrafts[i]);
+			let x = ac.getAttribute('data-transform-translate-x');
+			let y = ac.getAttribute('data-transform-translate-y');
+			ac.setAttribute('transform', 'translate(' + x + ',' + y + ') ' + (ac.getAttribute('data-transform-rotate') || ""));
+			ac.setAttribute('data-move-x', x);
+			ac.setAttribute('data-move-y', y);
+		}
+		// reset ans
+		g('txtAnsTrueFalse').setAttribute('fill', 'transparent');
+	}, false);
+	g('btnCheckAnswer').addEventListener('click', checkAnswer, false);
+
+	// timer
+	g('btnSetTimer').addEventListener('click', function() {
+		let min = g('selectTimer').value;
+		startTimer(min);
+		g('divWithoutTimerTimer').style.display = 'none';
+		g('divWithTimerTimer').style.display = 'block';
+	}, false);
+
+	// start again = reload the page
+	g('btnStartAgain').addEventListener('click', function() {
+		location.reload();
+	}, false);
+
+	// draggable
+	interact('.draggable').draggable({
+		// enable inertial throwing
+		inertia: true,
+		// keep the element within the area of it's parent
+		restrict: {
+			restriction: "parent",
+			endOnly: true,
+			elementRect: { top: 0, left: 0, bottom: 1, right: 1 }
+		},
+		// enable autoScroll
+		autoScroll: true,
+		// call this function on every dragmove event
+		onmove: dragMoveListener,
+		// call this function on every dragend event
+		onend: function (event) {
+			let target = event.target;
+			if(selectedDropzone == null) {
+				selectedAircraft = null;
+
+				// move back to original position
+				let x = (target.getAttribute('data-transform-translate-x') || 0);
+				let y = (target.getAttribute('data-transform-translate-y') || 0);
+				
+				// translate the element
+				target.setAttribute('transform', 'translate(' + x + ',' + y + ') ' + (target.getAttribute('data-transform-rotate') || ""));
+				
+				// update the posiion attributes
+				target.setAttribute('data-move-x', x);
+				target.setAttribute('data-move-y', y);
+			}
+		}
+	});
+	interact('.dropzone').dropzone({
+		accept: '.draggable',
+		ondropactivate: function (event) {
+			event.target.style.fill = '#CCCCFF';
+			var aircraft = event.relatedTarget;
+			if(selectedAircraft != null && selectedAircraft != aircraft.getAttribute('id')) {
+				// reset previous a/c position
+				let ac = g(selectedAircraft);
+				let x = ac.getAttribute('data-transform-translate-x');
+				let y = ac.getAttribute('data-transform-translate-y');
+				ac.setAttribute('transform', 'translate(' + x + ',' + y + ') ' + (ac.getAttribute('data-transform-rotate') || ""));
+				ac.setAttribute('data-move-x', x);
+				ac.setAttribute('data-move-y', y);
+				selectedDropzone = null;
+			}
+			selectedAircraft = aircraft.getAttribute('id');
+		},
+		ondragenter: function(event) {
+			var aircraft = event.relatedTarget;
+			var dropzone = event.target;
+			// selectedAircraft = aircraft.getAttribute('id');
+			dropzone.style.fill = '#FFFFCC';
+			selectedDropzone = dropzone.getAttribute('id');
+			console.log(selectedAircraft + ', ' + selectedDropzone);
+		},
+		ondragleave: function (event) {
+			var aircraft = event.relatedTarget;
+			var dropzone = event.target;
+			dropzone.style.fill = '#CCCCFF';
+			selectedDropzone = null;
+			console.log(selectedAircraft + ', ' + selectedDropzone);
+		},
+		ondropdeactivate: function (event) {
+			event.target.style.fill = '#EFEFEF';
+		}
+	})
+}
+	
+var dragMoveListener = function (event) {
+	var target = event.target,
+	// keep the dragged position in the data-x/data-y attributes
+	x = Number(target.getAttribute('data-move-x') || target.getAttribute('data-transform-translate-x') || 0) + event.dx,
+	y = Number(target.getAttribute('data-move-y') || target.getAttribute('data-transform-translate-y') || 0) + event.dy;
+	
+	// update the posiion attributes
+	target.setAttribute('data-move-x', x);
+	target.setAttribute('data-move-y', y);
+
+	// snaps
+	var snap = snap9box(x, y);
+
+	// translate the element
+	target.setAttribute('transform', 'translate(' + snap.x + ',' + snap.y + ') ' + (target.getAttribute('data-transform-rotate') || ""));	
+}
+
+var snap9box = function(x, y) {
+	for(let i = 75; i <= 135; i += 30) {
+		for(let j = 45; j <= 105; j += 30) {
+			if(i == 105 && j == 75)
+				continue; // radio beacon
+			if( Math.sqrt((x - i) * (x - i) + (y - j) * (y - j)) <= 10)
+				return { x : i, y : j };
+		}
+	}
+	return { x : x, y : y };
+}
+
+var checkAnswer = function() {
+	let ans = g('txtAnsTrueFalse');
+	if(selectedAircraft == null || selectedDropzone == null) {
+		ans.innerHTML = 'You have not answered this question!';
+		ans.setAttribute('fill', 'black');
+		ans.setAttribute('x', '60');
+	} else {
+		let correctAns = questionBank[questionBank.length - 1];
+		let correctAircraft = 'ac' + Math.ceil(correctAns % 4);
+		let correctDropzone = 'dz' + (Math.floor(correctAns * 0.25) + (4 - Math.floor(correctAns % 4)) % 4 * 2) % 8;
+		console.log(JSON.stringify(correctAns));
+		console.log(correctAircraft + ', ' + correctDropzone);
+		if(selectedAircraft == correctAircraft && selectedDropzone == correctDropzone) {
+			ans.innerHTML = 'Correct!';
+			ans.setAttribute('fill', 'green');
+			ans.setAttribute('x', '200');
+			if(correctQuestion.length < pastQuestions.length)
+				correctQuestion[pastQuestions.length - 1] = 1;
+		} else {
+			ans.innerHTML = 'Wrong!';
+			ans.setAttribute('fill', 'red');
+			ans.setAttribute('x', '200');
+			if(correctQuestion.length < pastQuestions.length)
+				correctQuestion[pastQuestions.length - 1] = 0;
+		}
+		updateCorrectQuestions();
+	}
+}
+
+var updateCorrectQuestions = function () {
+	var total = 0;
+	for(let i = 0; i < correctQuestion.length; ++i)
+		total += correctQuestion[i];
+	var percentage = 100;
+	if(correctQuestion.length > 0)
+		percentage = (100 * total / correctQuestion.length).toFixed(1);
+	g('spanCorrectQuestions').innerHTML = percentage + '% (' + total + '/' + correctQuestion.length + ')';
+}
+
+var startTimer = function(min) {
+	let d = new Date();
+	timerExpire = d.getTime() + min * 60000; // 1 min = 60 sec = 60000 milliseconds
+	let countdown = timerExpire - d.getTime() - 1;
+	let countdownMin = ("0" + Math.floor(countdown / 60000));
+	let countdownSec = ("0" + Math.floor(countdown / 1000));
+	
+	g('divWithTimer').style.display = 'block';
+	g('divWithoutTimer').style.display = 'none';
+	g('divTimeIsUp').style.display = 'none';
+	g('spanTimeLeft').innerHTML = countdownMin.substring(countdownMin.length - 2) + ":" + countdownSec.substring(countdownSec.length - 2);
+	timerInterval = setInterval(function() {
+		let d = new Date();
+		let countdown = timerExpire - d.getTime();
+		if(countdown < 0) {
+			g('spanTimeLeft').innerHTML = '0:00';
+			g('divWithTimer').style.display = 'none';
+			g('divTimeIsUp').style.display = 'block';
+			let score = g('spanCorrectQuestions').innerHTML;
+			if(score.length == 0)
+				score = '0.0% (0/0)';
+			g('spanScore').innerHTML = score;
+			clearInterval(timerInterval);
+		} else {
+			let countdownMin = ("0" + Math.floor(countdown / 60000));
+			let countdownSec = ("0" + Math.floor(countdown % 60000 / 1000));
+			g('spanTimeLeft').innerHTML = countdownMin.substring(countdownMin.length - 2) + ":" + countdownSec.substring(countdownSec.length - 2);
+		}
+	}, 50);
+}
+// this is used later in the resizing and gesture demos
+window.dragMoveListener = dragMoveListener;
+window.onload=docLoad;
+</script>
+</head>
+<body>
+<h1>cut-e Spatial Orientation</h1>
+<div>
+	<p>1. Select the aircraft flying the direction indicated by the GYRO and drag it to the zone indicated by the RBI.</p>
+	<p>2. Press Next when you are finished</p>
+</div>
+<div id="divCanvas">
+	<canvas id="canvas" width="480" height="240"></canvas>
+</div>
+<div>
+<svg id="svgAnswers">
+	<defs>
+		<rect id="rect" x="0" y="0" height="30" width="30" style="stroke:#000000; fill:#cccccc"/>
+		<g id="aircraft">
+			<use xlink:href="#rect" x="0" y="0" />
+			<polygon points="15,5 13,7 13,12 5,15 5,18 13,17 13,20 10,22 10,25 13,24 15,25 17,24 20,25 20,22 17,20 17,17 25,18 25,15 17,12 17,7" style="stroke:#000000; fill:#000000;"/>
+		</g>
+	</defs>
+	
+	<!-- 9 box -->
+	<rect id="dz3" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="75" y="45" />
+	<rect id="dz2" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="75" y="75" />
+	<rect id="dz1" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="75" y="105" />
+	<rect id="dz4" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="105" y="45" />
+	<rect id="dzX" height="30" width="30" style="stroke:#000000; fill:#efefef" x="105" y="75" />
+	<rect id="dz0" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="105" y="105" />
+	<rect id="dz5" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="135" y="45" />
+	<rect id="dz6" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="135" y="75" />
+	<rect id="dz7" class="dropzone" height="30" width="30" style="stroke:#000000; fill:#efefef" x="135" y="105" />
+	<text x="85" y="67" fill="black" style="font:bold 15pt Arial;text-align:center">8</text>
+	<text x="85" y="97" fill="black" style="font:bold 15pt Arial;text-align:center">7</text>
+	<text x="85" y="127" fill="black" style="font:bold 15pt Arial;text-align:center">6</text>
+	<text x="115" y="67" fill="black" style="font:bold 15pt Arial;text-align:center">1</text>
+	<!-- text x="115" y="97" fill="black" style="font:bold 15pt Arial;text-align:center">X</text -->
+	<text x="115" y="127" fill="black" style="font:bold 15pt Arial;text-align:center">5</text>
+	<text x="145" y="67" fill="black" style="font:bold 15pt Arial;text-align:center">2</text>
+	<text x="145" y="97" fill="black" style="font:bold 15pt Arial;text-align:center">3</text>
+	<text x="145" y="127" fill="black" style="font:bold 15pt Arial;text-align:center">4</text>
+	
+	<!-- radio beacon -->
+	<circle cx="120" cy="90" r="12" style="stroke: #000000; fill: transparent" />
+	<circle cx="120" cy="90" r="7" style="stroke: #000000; fill: transparent" />
+	<circle cx="120" cy="90" r="2" style="stroke: #000000; fill: #000000" />
+	
+	<!-- aircrafts -->
+	<use id="ac0" class="draggable" xlink:href="#aircraft" x="0" y="0" data-transform-translate-x="330" data-transform-translate-y="60" data-transform-rotate="" transform="translate(330,60)" />
+	<use id="ac3" class="draggable" xlink:href="#aircraft" x="0" y="0" data-transform-translate-x="330" data-transform-translate-y="90" data-transform-rotate="rotate(90 15,15)" transform="translate(330,90) rotate(90 15,15)" />
+	<use id="ac2" class="draggable" xlink:href="#aircraft" x="0" y="0" data-transform-translate-x="360" data-transform-translate-y="90" data-transform-rotate="rotate(180 15,15)" transform="translate(360,90) rotate(180 15,15)" />
+	<use id="ac1" class="draggable" xlink:href="#aircraft" x="0" y="0" data-transform-translate-x="360" data-transform-translate-y="60" data-transform-rotate="rotate(270 15,15)" transform="translate(360,60) rotate(270 15,15)" />
+	
+	<!-- answer -->
+	<text id="txtAnsTrueFalse" x="85" y="160" fill="transparent" style="font:bold 15pt Arial;text-align:center;">Correct!</text>
+</svg>
+</div>
+<div id="divButtons">
+	<input id="btnCheckAnswer" type="button" value="Check Ans" style="height:50px;width:170px" />
+	<input id="btnDrawAgain" type="button" value="Next" style="height:50px;width:110px" />
+	<span id="spanCorrectQuestions"></span>
+</div>
+<div id="divTimer">
+	<div id="divWithoutTimer">
+		<input id="btnSetTimer" type="button" value="Set Timer" style="height:50px;width:170px" />
+		<span id="spanSetTimer">
+			Timer:
+			<select id="selectTimer">
+				<option value="1">1</option>
+				<option value="2">2</option>
+				<option value="3" selected="selected">3</option>
+				<option value="5">5</option>
+			</select>
+			Minutes
+		</span>
+	</div>
+	<div id="divWithTimer">
+		Time: <span id="spanTimeLeft"></span>
+	</div>
+	<div id="divTimeIsUp">
+		Time is up! Your score is <span id="spanScore"></span>
+	</div>
+	<div>
+		<input id="btnStartAgain" type="button" value="Start Again!" style="height:50px;width:170px" />
+	</div>
+</div>
+</body>
+</html>
